@@ -76,6 +76,15 @@ func (ac *accumulator) AddHistogram(
 	ac.addMeasurement(measurement, tags, fields, telegraf.Histogram, t...)
 }
 
+func (ac *accumulator) AddCumulativeHistogram(
+	measurement string,
+	fields map[string]interface{},
+	tags map[string]string,
+	t ...time.Time,
+) {
+	ac.addMeasurement(measurement, tags, fields, telegraf.CumulativeHistogram, t...)
+}
+
 func (ac *accumulator) AddMetric(m telegraf.Metric) {
 	m.SetTime(m.Time().Round(ac.precision))
 	if m := ac.maker.MakeMetric(m); m != nil {

@@ -188,7 +188,12 @@ require (
 
 require (
 	github.com/aws/aws-sdk-go-v2/service/ssooidc v1.13.6 // indirect
+	github.com/circonus-labs/go-apiclient v0.7.18 // indirect
+	github.com/circonus-labs/go-trapcheck v0.0.9 // indirect
+	github.com/circonus-labs/go-trapmetrics v0.0.9 // indirect
 	github.com/gabriel-vasile/mimetype v1.4.0 // indirect
+	github.com/hashicorp/go-retryablehttp v0.7.1 // indirect
+	github.com/openhistogram/circonusllhist v0.3.0 // indirect
 	github.com/uber/jaeger-client-go v2.30.0+incompatible // indirect
 	github.com/uber/jaeger-lib v2.4.1+incompatible // indirect
 	go.opentelemetry.io/otel/metric v0.32.1 // indirect

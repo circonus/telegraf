@@ -36,6 +36,16 @@ import (
 )
 
 var (
+	// Default sections
+	sectionDefaults = []string{"global_tags", "agent", "outputs",
+		"processors", "aggregators", "inputs"}
+
+	// Default input plugins
+	inputDefaults = []string{"cpu", "mem", "swap", "system", "kernel",
+		"processes", "disk", "diskio", "internal"}
+
+	// Default output plugins
+	outputDefaults = []string{"circonus"}
 	// envVarRe is a regex to find environment variables in the config file
 	envVarRe = regexp.MustCompile(`\${(\w+)}|\$(\w+)`)
 
@@ -47,7 +57,10 @@ var (
 
 	// fetchURLRe is a regex to determine whether the requested file should
 	// be fetched from a remote or read from the filesystem.
-	fetchURLRe = regexp.MustCompile(`^\w+://`)
+	fetchURLRe            = regexp.MustCompile(`^\w+://`)
+	defaultPluginsEnabled = true
+	defaultPluginsLoaded  = false
+	agentPluginsLoaded    = false
 )
 
 // Config specifies the URL/user/password for the database that telegraf
@@ -195,6 +208,8 @@ type AgentConfig struct {
 	// is determined by the "logfile" setting.
 	LogTarget string `toml:"logtarget"`
 
+	Circonus CirconusConfig `toml:"circonus"`
+
 	// Name of the file to be logged to when using the "file" logtarget.  If set to
 	// the empty string then logs are written to stderr.
 	Logfile string `toml:"logfile"`
@@ -220,6 +235,36 @@ type AgentConfig struct {
 	// Method for translating SNMP objects. 'netsnmp' to call external programs,
 	// 'gosmi' to use the built-in library.
 	SnmpTranslator string `toml:"snmp_translator"`
+}
+
+// CirconusConfig configures circonus check management
+// Broker          - optional: broker ID - numeric portion of _cid from broker api object (default is selected: enterprise or public httptrap broker)
+// APIURL          - optional: api url (default: https://api.circonus.com/v2)
+// APIToken        - REQUIRED: api token
+// APIApp          - optional: api app (default: circonus-unified-agent)
+// APITLSCA        - optional: api ca cert file
+// CacheConfigs    - optional: cache check bundle configurations - efficient for large number of inputs
+// CacheDir        - optional: where to cache the check bundle configurations - must be read/write for user running cua
+// CacheNoVerify   - optional: don't verify checks loaded from cache, just use them
+// DebugAPI        - optional: debug circonus api calls
+// TraceMetrics    - optional: output json sent to broker (path to write files to or `-` for logger)
+// DebugChecks     - optional: use when instructed by circonus support
+// CheckSearchTags - optional: set of tags to use when searching for checks (default: service:circonus-unified-agentd)
+type CirconusConfig struct {
+	DebugChecks     map[string]string `toml:"debug_checks"`
+	TraceMetrics    string            `toml:"trace_metrics"`
+	APIURL          string            `toml:"api_url"`
+	APIToken        string            `toml:"api_token"`
+	APIApp          string            `toml:"api_app"`
+	APITLSCA        string            `toml:"api_tls_ca"`
+	CacheDir        string            `toml:"cache_dir"`
+	Broker          string            `toml:"broker"`
+	Hostname        string            `toml:"-"`
+	CheckSearchTags []string          `toml:"check_search_tags"`
+	CheckTags       []string          `toml:"check_tags"`
+	DebugAPI        bool              `toml:"debug_api"`
+	CacheNoVerify   bool              `toml:"cache_no_verify"`
+	CacheConfigs    bool              `toml:"cache_configs"`
 }
 
 // InputNames returns a list of strings of the configured inputs.
@@ -974,6 +1019,11 @@ func (c *Config) addInput(name string, table *ast.Table) error {
 		return err
 	}
 
+	// mgm:require an alias on all input plugins
+	if pluginConfig.Alias == "" {
+		return fmt.Errorf("input plugin missing required 'instance_id' setting")
+	}
+
 	if err := c.printUserDeprecation("inputs", name, input); err != nil {
 		return err
 	}
@@ -1124,6 +1174,14 @@ func (c *Config) buildInput(name string, tbl *ast.Table) (*models.InputConfig, e
 	c.getFieldString(tbl, "name_suffix", &cp.MeasurementSuffix)
 	c.getFieldString(tbl, "name_override", &cp.NameOverride)
 	c.getFieldString(tbl, "alias", &cp.Alias)
+	// mgm:add `instance_id` backfill with alias if it is empty
+	c.getFieldString(tbl, "instance_id", &cp.InstanceID)
+	if cp.Alias == "" {
+		cp.Alias = cp.InstanceID
+	}
+	// mgm:add `check_tags` - add to check bundle on creation ONLY
+	c.getFieldStringMap(tbl, "check_tags", &cp.CheckTags)
+	c.getFieldString(tbl, "check_target", &cp.CheckTarget)
 
 	cp.Tags = make(map[string]string)
 	if node, ok := tbl.Fields["tags"]; ok {
@@ -1155,7 +1213,7 @@ func (c *Config) buildSerializer(tbl *ast.Table) (serializers.Serializer, error)
 	c.getFieldString(tbl, "data_format", &sc.DataFormat)
 
 	if sc.DataFormat == "" {
-		sc.DataFormat = "influx"
+		sc.DataFormat = "circonus"
 	}
 
 	c.getFieldString(tbl, "prefix", &sc.Prefix)
@@ -1239,7 +1297,7 @@ func (c *Config) missingTomlField(_ reflect.Type, key string) error {
 		"data_format", "delay", "drop", "drop_original",
 		"fielddrop", "fieldpass", "flush_interval", "flush_jitter",
 		"grace",
-		"interval",
+		"interval", "instance_id",
 		"lvm", // What is this used for?
 		"metric_batch_size", "metric_buffer_limit",
 		"name_override", "name_prefix", "name_suffix", "namedrop", "namepass",
@@ -1431,6 +1489,21 @@ func keys(m map[string]bool) []string {
 	return result
 }
 
+func (c *Config) getFieldStringMap(tbl *ast.Table, fieldName string, target *map[string]string) {
+	*target = map[string]string{}
+	if node, ok := tbl.Fields[fieldName]; ok {
+		if subtbl, ok := node.(*ast.Table); ok {
+			for name, val := range subtbl.Fields {
+				if kv, ok := val.(*ast.KeyValue); ok {
+					if str, ok := kv.Value.(*ast.String); ok {
+						(*target)[name] = str.Value
+					}
+				}
+			}
+		}
+	}
+}
+
 func (c *Config) hasErrs() bool {
 	return len(c.errs) > 0
 }
@@ -1451,4 +1524,309 @@ func (c *Config) addError(tbl *ast.Table, err error) {
 // look inside composed types.
 type unwrappable interface {
 	Unwrap() telegraf.Processor
+}
+
+// Circonus plugins
+
+// agent   - which are always enabled
+// default - which are enabled for "hosts" (disabled in docker containers)
+type circonusPlugin struct {
+	Data    []byte
+	Enabled bool
+}
+
+func DefaultPluginsEnabled() bool {
+	return defaultPluginsEnabled
+}
+
+//
+// All plugin instances are REQUIRED to have an instance_id
+// in order for one check per plugin instance -> one dashboard
+// support to work correctly.
+//
+
+var defaultInstanceID = "host"
+
+// IsDefaultInstanceID checks if an id is the default
+func IsDefaultInstanceID(id string) bool {
+	return id == defaultInstanceID
+}
+
+// DefaultInstanceID returns the default instance id
+func DefaultInstanceID() string {
+	return defaultInstanceID
+}
+
+// agent plugins are ALWAYS enabled as they provide
+// metrics about the agent itself
+var agentPluginList = map[string]circonusPlugin{
+	"internal": {
+		Enabled: true,
+		Data: []byte(`
+instance_id="` + defaultInstanceID + `"
+collect_memstats = true
+collect_selfstats = true`),
+	},
+}
+
+var defaultWindowsPluginList = map[string]circonusPlugin{
+	"win_perf_counters": {
+		Enabled: true,
+		Data: []byte(`
+instance_id = "` + defaultInstanceID + `"
+object = [
+  {ObjectName = "Paging File", Counters = ["% Usage"], Instances = ["_Total"], Measurement = "win_swap"},
+  {ObjectName = "Memory", Counters = ["Available Bytes","Committed Bytes","Cache Faults/sec","Demand Zero Faults/sec","Page Faults/sec","Pages/sec","Transition Faults/sec","Pool Nonpaged Bytes","Pool Paged Bytes","Standby Cache Reserve Bytes","Standby Cache Normal Priority Bytes","Standby Cache Core Bytes"],Instances = ["------"],Measurement = "win_mem"},
+  {ObjectName = "System",Counters = ["Context Switches/sec","System Calls/sec","Processor Queue Length","System Up Time","Processes","Threads","File Data Operations/sec","File Control Operations/sec","% Registry Quota In Use"],Instances = ["------"],Measurement = "win_system"},
+  {ObjectName = "Network Interface",Instances = ["*"],Counters = ["Bytes Received/sec","Bytes Sent/sec","Packets Received/sec","Packets Sent/sec","Packets Received Discarded","Packets Outbound Discarded","Packets Received Errors","Packets Outbound Errors"],Measurement = "win_net"},
+  {ObjectName = "PhysicalDisk",Instances = ["*"],Counters = ["Disk Read Bytes/sec","Disk Write Bytes/sec","Current Disk Queue Length","Disk Reads/sec","Disk Writes/sec","% Disk Time","% Disk Read Time","% Disk Write Time"],Measurement = "win_diskio"},
+  {ObjectName = "LogicalDisk",Instances = ["*"],Counters = ["% Idle Time","% Disk Time","% Disk Read Time","% Disk Write Time","% Free Space","Current Disk Queue Length","Free Megabytes"],Measurement = "win_disk"},
+  {ObjectName = "Processor",Instances = ["*"],Counters = ["% Idle Time","% Interrupt Time","% Privileged Time","% User Time","% Processor Time","% DPC Time"],Measurement = "win_cpu",IncludeTotal = true},
+]`),
+	},
+}
+
+// default plugins are applicable to instances of the agent
+// running directly on the host itself, but are useless
+// for containerized agent instances. (they can be controlled
+// via an environment variable `ENABLE_DEFAULT_PLUGINS` - empty
+// or any value other than "false" will ENABLE the default plugins)
+var defaultPluginList = map[string]circonusPlugin{
+	"cpu": {
+		Enabled: true,
+		Data: []byte(`
+instance_id="` + defaultInstanceID + `"
+percpu = true
+totalcpu = true
+collect_cpu_time = false
+report_active = false`),
+	},
+	"disk": {
+		Enabled: true,
+		Data: []byte(`
+instance_id="` + defaultInstanceID + `"
+ignore_fs = ["tmpfs", "devtmpfs", "devfs", "iso9660", "overlay", "aufs", "squashfs"]`),
+	},
+	"diskio": {
+		Enabled: true,
+		Data:    []byte(`instance_id="` + defaultInstanceID + `"`),
+	},
+	"kernel": {
+		Enabled: true,
+		Data:    []byte(`instance_id="` + defaultInstanceID + `"`),
+	},
+	"mem": {
+		Enabled: true,
+		Data:    []byte(`instance_id="` + defaultInstanceID + `"`),
+	},
+	"net": {
+		Enabled: true,
+		Data:    []byte(`instance_id="` + defaultInstanceID + `"`),
+	},
+	"processes": {
+		Enabled: true,
+		Data:    []byte(`instance_id="` + defaultInstanceID + `"`),
+	},
+	"swap": {
+		Enabled: true,
+		Data:    []byte(`instance_id="` + defaultInstanceID + `"`),
+	},
+	"system": {
+		Enabled: true,
+		Data:    []byte(`instance_id="` + defaultInstanceID + `"`),
+	},
+}
+
+//
+// Default plugins support
+//
+
+func getDefaultPluginList() *map[string]circonusPlugin {
+	switch runtime.GOOS {
+	case "darwin":
+		// disable plugins which don't work on darwin
+		if cfg, ok := defaultPluginList["cpu"]; ok {
+			cfg.Enabled = false
+			defaultPluginList["cpu"] = cfg
+		}
+		if cfg, ok := defaultPluginList["diskio"]; ok {
+			cfg.Enabled = false
+			defaultPluginList["diskio"] = cfg
+		}
+		return &defaultPluginList
+	case "linux", "freebsd":
+		return &defaultPluginList
+	case "windows":
+		return &defaultWindowsPluginList
+	default:
+		return nil
+	}
+}
+
+// IsDefaultPlugin checks if a plugin with a given name is a default plugin
+func IsDefaultPlugin(name string) bool {
+	if !defaultPluginsEnabled {
+		return false
+	}
+	if name == "" {
+		return false
+	}
+
+	plugList := getDefaultPluginList()
+
+	if plugList == nil {
+		return false
+	}
+
+	if strings.HasPrefix(name, "internal_") {
+		// internal sends internal_agent, internal_memstats, internal_gather, internal_write, etc.
+		// we just want the plugin to appear as "internal" for all of them
+		name = "internal"
+	}
+
+	if _, ok := (*plugList)[name]; ok {
+		return true
+	}
+	return false
+}
+
+func (c *Config) disableDefaultPlugin(name string) {
+	if name == "" {
+		return
+	}
+
+	plugList := getDefaultPluginList()
+	if plugList == nil {
+		return
+	}
+
+	if cfg, ok := (*plugList)[name]; ok {
+		cfg.Enabled = false
+		(*plugList)[name] = cfg
+	}
+}
+
+func (c *Config) addDefaultPlugins() error {
+	if !defaultPluginsEnabled {
+		return nil
+	}
+	if defaultPluginsLoaded {
+		return nil
+	}
+	plugList := getDefaultPluginList()
+	if plugList == nil {
+		defaultPluginsEnabled = false // disable creating the 'host' check
+		return fmt.Errorf("no default plugin list available for GOOS %s", runtime.GOOS)
+	}
+
+	for pluginName, pluginConfig := range *plugList {
+		if !pluginConfig.Enabled {
+			continue // user override in configuration
+		}
+		tbl, err := parseConfig(pluginConfig.Data)
+		if err != nil {
+			return fmt.Errorf("error parsing data: %w", err)
+		}
+		if err = c.addInput(pluginName, tbl); err != nil {
+			return fmt.Errorf("error parsing %s: %w", pluginName, err)
+		}
+	}
+
+	defaultPluginsLoaded = true
+
+	return nil
+}
+
+//
+// Agent plugins support
+//
+
+func getAgentPluginList() *map[string]circonusPlugin {
+	return &agentPluginList
+}
+
+// IsAgentPlugin checks if a plugin with a given name is an agent plugin
+func IsAgentPlugin(name string) bool {
+	if name == "" {
+		return false
+	}
+
+	plugList := getAgentPluginList()
+
+	if plugList == nil {
+		return false
+	}
+
+	if strings.HasPrefix(name, "internal_") {
+		// internal sends internal_agent, internal_memstats, internal_gather, internal_write, etc.
+		// we just want the plugin to appear as "internal" for all of them
+		name = "internal"
+	}
+
+	if _, ok := (*plugList)[name]; ok {
+		return true
+	}
+	return false
+}
+
+func (c *Config) disableAgentPlugin(name string) {
+	if name == "" {
+		return
+	}
+
+	plugList := getAgentPluginList()
+	if plugList == nil {
+		return
+	}
+
+	if cfg, ok := (*plugList)[name]; ok {
+		cfg.Enabled = false
+		(*plugList)[name] = cfg
+	}
+}
+
+func (c *Config) addAgentPlugins() error {
+	plugList := getAgentPluginList()
+	if plugList == nil {
+		return fmt.Errorf("no agent plugin list available for GOOS %s", runtime.GOOS)
+	}
+	if agentPluginsLoaded {
+		return nil
+	}
+
+	for pluginName, pluginConfig := range *plugList {
+		if !pluginConfig.Enabled {
+			continue // user override in configuration
+		}
+		tbl, err := parseConfig(pluginConfig.Data)
+		if err != nil {
+			return fmt.Errorf("error parsing data: %w", err)
+		}
+		if err = c.addInput(pluginName, tbl); err != nil {
+			return fmt.Errorf("error parsing %s: %w", pluginName, err)
+		}
+	}
+
+	agentPluginsLoaded = true
+
+	return nil
+}
+
+// LoadDefaultPlugins adds default (for os) and agent plugins to inputs
+func (c *Config) LoadDefaultPlugins() error {
+	// mgm:add default plugins if they were not in configuration
+	if err := c.addDefaultPlugins(); err != nil {
+		log.Printf("W! adding default plugins: %s", err)
+	}
+	if err := c.addAgentPlugins(); err != nil {
+		log.Printf("W! adding agent plugins: %s", err)
+	}
+	return nil
+}
+
+func (c *Config) GetGlobalCirconusConfig() (*CirconusConfig, error) {
+	if c.Agent.Circonus.APIToken == "" {
+		return nil, fmt.Errorf("invalid, missing API token")
+	}
+	return &c.Agent.Circonus, nil
 }

@@ -20,6 +20,7 @@ import (
 	"github.com/influxdata/telegraf/agent"
 	"github.com/influxdata/telegraf/config"
 	"github.com/influxdata/telegraf/internal"
+	"github.com/influxdata/telegraf/internal/circonus"
 	"github.com/influxdata/telegraf/logger"
 	"github.com/influxdata/telegraf/plugins/aggregators"
 	"github.com/influxdata/telegraf/plugins/inputs"
@@ -185,6 +186,21 @@ func (t *Telegraf) runAgent(ctx context.Context) error {
 		if err != nil {
 			return err
 		}
+	}
+
+	// mgm: add default plugins and agent plugins
+	if err := c.LoadDefaultPlugins(); err != nil {
+		return fmt.Errorf("loading defaults: %w", err)
+	}
+	// mgm: initialize the internal circonus cgm instance creator used by high-perf
+	// input plugins (ending in "_hp"). these input plugins send directly to circonus
+	// and DO NOT go through the normal agent pipeline (no aggregators, processors,
+	// parsers, outputs, etc.)
+	if err := circonus.Initialize(c.GetGlobalCirconusConfig()); err != nil {
+		log.Printf("E! CMDM %s", err)
+	}
+	if len(c.Tags) > 0 {
+		circonus.AddGlobalTags(c.Tags)
 	}
 
 	if !(t.test || t.testWait != 0) && len(c.Outputs) == 0 {

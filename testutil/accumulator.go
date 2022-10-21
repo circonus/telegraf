@@ -192,6 +192,15 @@ func (a *Accumulator) AddHistogram(
 	a.addMeasurement(measurement, tags, fields, telegraf.Histogram, timestamp...)
 }
 
+func (a *Accumulator) AddCumulativeHistogram(
+	measurement string,
+	fields map[string]interface{},
+	tags map[string]string,
+	timestamp ...time.Time,
+) {
+	a.addMeasurement(measurement, tags, fields, telegraf.CumulativeHistogram, timestamp...)
+}
+
 func (a *Accumulator) AddMetric(m telegraf.Metric) {
 	a.addMeasurement(m.Name(), m.Tags(), m.Fields(), m.Type(), m.Time())
 }
@@ -734,6 +743,8 @@ func (n *NopAccumulator) AddCounter(_ string, _ map[string]interface{}, _ map[st
 func (n *NopAccumulator) AddSummary(_ string, _ map[string]interface{}, _ map[string]string, _ ...time.Time) {
 }
 func (n *NopAccumulator) AddHistogram(_ string, _ map[string]interface{}, _ map[string]string, _ ...time.Time) {
+}
+func (n *NopAccumulator) AddCumulativeHistogram(_ string, _ map[string]interface{}, _ map[string]string, _ ...time.Time) {
 }
 func (n *NopAccumulator) AddMetric(telegraf.Metric)                       {}
 func (n *NopAccumulator) SetPrecision(_ time.Duration)                    {}

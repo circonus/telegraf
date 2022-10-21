@@ -29,6 +29,10 @@ func NewRunningInput(input telegraf.Input, config *InputConfig) *RunningInput {
 		tags["alias"] = config.Alias
 	}
 
+	if config.InstanceID != "" {
+		tags["instance_id"] = config.InstanceID
+	}
+
 	inputErrorsRegister := selfstat.Register("gather", "errors", tags)
 	logger := NewLogger("inputs", config.Name, config.Alias)
 	logger.OnErr(func() {
@@ -57,6 +61,7 @@ func NewRunningInput(input telegraf.Input, config *InputConfig) *RunningInput {
 // InputConfig is the common config for all inputs.
 type InputConfig struct {
 	Name             string
+	InstanceID       string
 	Alias            string
 	Interval         time.Duration
 	CollectionJitter time.Duration
@@ -66,6 +71,8 @@ type InputConfig struct {
 	NameOverride      string
 	MeasurementPrefix string
 	MeasurementSuffix string
+	CheckTarget       string
+	CheckTags         map[string]string
 	Tags              map[string]string
 	Filter            Filter
 }

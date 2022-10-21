@@ -10,10 +10,15 @@ import (
 )
 
 type metric struct {
-	name   string
-	tags   []*telegraf.Tag
-	fields []*telegraf.Field
-	tm     time.Time
+	name              string
+	tags              []*telegraf.Tag
+	originInstance    string
+	origin            string
+	originCheckTarget string
+	originCheckTags   map[string]string
+	fields            []*telegraf.Field
+	tm                time.Time
+	aggregate         bool
 
 	tp telegraf.ValueType
 }
@@ -248,6 +253,14 @@ func (m *metric) Copy() telegraf.Metric {
 	return m2
 }
 
+func (m *metric) SetAggregate(b bool) {
+	m.aggregate = true
+}
+
+func (m *metric) IsAggregate() bool {
+	return m.aggregate
+}
+
 func (m *metric) HashID() uint64 {
 	h := fnv.New64a()
 	h.Write([]byte(m.name)) //nolint:revive // all Write() methods for hash in fnv.go returns nil err
@@ -367,4 +380,39 @@ func convertField(v interface{}) interface{} {
 		return nil
 	}
 	return nil
+}
+
+func (m *metric) Origin() string {
+	return m.origin
+}
+func (m *metric) SetOrigin(origin string) {
+	m.origin = origin
+}
+
+func (m *metric) OriginInstance() string {
+	return m.originInstance
+}
+func (m *metric) SetOriginInstance(instanceID string) {
+	m.originInstance = instanceID
+}
+
+func (m *metric) OriginCheckTags() map[string]string {
+	ret := make(map[string]string)
+	for k, v := range m.originCheckTags {
+		ret[k] = v
+	}
+	return ret
+}
+func (m *metric) SetOriginCheckTags(checkTags map[string]string) {
+	m.originCheckTags = make(map[string]string)
+	for k, v := range checkTags {
+		m.originCheckTags[k] = v
+	}
+}
+
+func (m *metric) OriginCheckTarget() string {
+	return m.originCheckTarget
+}
+func (m *metric) SetOriginCheckTarget(checkTarget string) {
+	m.originCheckTarget = checkTarget
 }
